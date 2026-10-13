@@ -19,7 +19,7 @@ jobs:
   build:
     name: Build module (arm64 / Android 13+)
     # 如果 build.py 依赖 Windows 特有的路径处理，把下面改成 windows-latest
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
