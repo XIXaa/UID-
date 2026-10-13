@@ -43,8 +43,8 @@ jobs:
           Expand-Archive -Path $ndkZip -DestinationPath $env:RUNNER_TEMP -Force
 
           # 组装成 Android SDK 标准目录结构：<SDK>/ndk/<version>
-          $sdkRoot  = Join-Path $env:RUNNER_TEMP 'android-sdk'
-          $ndkHome  = Join-Path $sdkRoot "ndk\$env:NDK_VERSION"
+          $sdkRoot = Join-Path $env:RUNNER_TEMP 'android-sdk'
+          $ndkHome = Join-Path $sdkRoot "ndk\$env:NDK_VERSION"
           New-Item -ItemType Directory -Force -Path (Split-Path $ndkHome) | Out-Null
           Move-Item -Path $ndkRoot -Destination $ndkHome
 
@@ -55,18 +55,32 @@ jobs:
             Write-Error "NDK 版本不匹配，期望 $env:NDK_VERSION"
           }
 
-          "ANDROID_SDK_ROOT=$sdkRoot"  | Out-File -FilePath $env:GITHUB_ENV -Append
-          "ANDROID_HOME=$sdkRoot"      | Out-File -FilePath $env:GITHUB_ENV -Append
-          "ANDROID_NDK_HOME=$ndkHome"  | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ANDROID_SDK_ROOT=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ANDROID_HOME=$sdkRoot"     | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ANDROID_NDK_HOME=$ndkHome" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Verify NDK toolchain
         shell: pwsh
         run: |
-          $clang = Join-Path $env:ANDROID_NDK_HOME 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.cmd'
-          if (-not (Test-Path $clang)) {
-            Write-Error "找不到 clang++：$clang"
+          $binDir = Join-Path $env:ANDROID_NDK_HOME 'toolchains\llvm\prebuilt\windows-x86_64\bin'
+          if (-not (Test-Path $binDir)) {
+            Write-Error "bin 目录不存在：$binDir"
             exit 1
           }
+
+          # NDK Windows 版里通用前端是 clang++.exe；.cmd 只出现在目标前缀包装器上
+          $clang = Join-Path $binDir 'clang++.exe'
+          if (-not (Test-Path $clang)) {
+            $clang = Join-Path $binDir 'clang++.cmd'
+          }
+          if (-not (Test-Path $clang)) {
+            Write-Host '未找到 clang++，bin 目录内容如下：'
+            Get-ChildItem $binDir | Select-Object -First 40 -ExpandProperty Name
+            Write-Error "找不到 clang++（已尝试 .exe 和 .cmd）"
+            exit 1
+          }
+
+          Write-Host "使用：$clang"
           & $clang --version
 
       - name: Build module
@@ -82,7 +96,7 @@ jobs:
             Write-Error '未找到构建产物 .zip'
             exit 1
           }
-          "zip=$($zip.FullName)"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zip=$($zip.FullName)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$($zip.BaseName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "构建产物：$($zip.FullName)"
           Get-Content "$($zip.FullName).sha256"
