@@ -7,19 +7,18 @@ on:
   pull_request:
   workflow_dispatch:
 
-# softprops/action-gh-release 需要写权限
 permissions:
   contents: write
 
 env:
   NDK_VERSION: 27.3.13750724
+  NDK_DIRNAME: android-ndk-r27d
   PYTHON_VERSION: '3.12'
 
 jobs:
   build:
     name: Build module (arm64 / Android 13+)
-    # 如果 build.py 依赖 Windows 特有的路径处理，把下面改成 windows-latest
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -30,48 +29,63 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Android NDK ${{ env.NDK_VERSION }}
+      - name: Download and install Android NDK ${{ env.NDK_VERSION }}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          SDKMGR="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          $ErrorActionPreference = 'Stop'
 
-          if [ ! -x "$SDKMGR" ]; then
-            echo "sdkmanager not found at $SDKMGR" >&2
-            exit 1
-          fi
+          $ndkZip  = Join-Path $env:RUNNER_TEMP 'ndk.zip'
+          $ndkRoot = Join-Path $env:RUNNER_TEMP $env:NDK_DIRNAME
+          $url     = "https://dl.google.com/android/repository/$env:NDK_DIRNAME-windows.zip"
 
-          # 接受许可（GitHub runner 上通常已接受，失败也不影响）
-          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
-          "$SDKMGR" --install "ndk;${NDK_VERSION}"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $ndkZip
+          Expand-Archive -Path $ndkZip -DestinationPath $env:RUNNER_TEMP -Force
 
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          # 组装成 Android SDK 标准目录结构：<SDK>/ndk/<version>
+          $sdkRoot  = Join-Path $env:RUNNER_TEMP 'android-sdk'
+          $ndkHome  = Join-Path $sdkRoot "ndk\$env:NDK_VERSION"
+          New-Item -ItemType Directory -Force -Path (Split-Path $ndkHome) | Out-Null
+          Move-Item -Path $ndkRoot -Destination $ndkHome
+
+          # 校验版本号，避免下载错了 r27x 变体
+          $sourceProps = Join-Path $ndkHome 'source.properties'
+          Get-Content $sourceProps
+          if (-not (Select-String -Path $sourceProps -Pattern "Pkg\.Revision\s*=\s*$([regex]::Escape($env:NDK_VERSION))" -Quiet)) {
+            Write-Error "NDK 版本不匹配，期望 $env:NDK_VERSION"
+          }
+
+          "ANDROID_SDK_ROOT=$sdkRoot"  | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ANDROID_HOME=$sdkRoot"      | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ANDROID_NDK_HOME=$ndkHome"  | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Verify NDK toolchain
+        shell: pwsh
         run: |
-          set -euo pipefail
-          ls -d "$ANDROID_NDK_HOME"
-          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" --version
+          $clang = Join-Path $env:ANDROID_NDK_HOME 'toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.cmd'
+          if (-not (Test-Path $clang)) {
+            Write-Error "找不到 clang++：$clang"
+            exit 1
+          }
+          & $clang --version
 
       - name: Build module
+        shell: pwsh
         run: python tools/uid-seccomp-module/build.py --module-only
 
       - name: Collect artifacts
         id: collect
+        shell: pwsh
         run: |
-          set -euo pipefail
-          ZIP="$(find build -type f -name '*.zip' | sort | head -n 1)"
-          if [ -z "$ZIP" ]; then
-            echo "::error::未找到构建产物 .zip" >&2
+          $zip = Get-ChildItem -Path build -Recurse -Filter *.zip | Select-Object -First 1
+          if (-not $zip) {
+            Write-Error '未找到构建产物 .zip'
             exit 1
-          fi
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "version=$(basename "$ZIP" .zip)" >> "$GITHUB_OUTPUT"
-          echo "构建产物：$ZIP"
-
-      - name: Show SHA-256
-        run: cat "${{ steps.collect.outputs.zip }}.sha256"
+          }
+          "zip=$($zip.FullName)"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$($zip.BaseName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "构建产物：$($zip.FullName)"
+          Get-Content "$($zip.FullName).sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
